@@ -1,16 +1,36 @@
-"""
-solver.py — KetKet Paket Backend
-Handles OSRM distance/duration matrix fetching and OR-Tools TSP optimization.
-"""
-
 import requests
 import math
 from typing import List, Tuple, Dict, Any, Optional
 
-
-# ---------------------------------------------------------------------------
-# Data Model
-# ---------------------------------------------------------------------------
+VEHICLES = {
+    "motorcycle": {
+        "name": "Sepeda Motor",
+        "icon": "🏍️",
+        "fuel_consumption_km_l": 40.0,
+        "fuel_price_rp_l": 10000.0,  # Pertalite
+        "avg_speed_km_h": 30.0,
+        "gmaps_mode": "two_wheeler",
+        "duration_scale": 0.8,
+    },
+    "car": {
+        "name": "Mobil",
+        "icon": "🚗",
+        "fuel_consumption_km_l": 12.0,
+        "fuel_price_rp_l": 12500.0,  # Pertamax/Pertalite average
+        "avg_speed_km_h": 20.0,
+        "gmaps_mode": "driving",
+        "duration_scale": 1.0,
+    },
+    "truck": {
+        "name": "Truk",
+        "icon": "🚚",
+        "fuel_consumption_km_l": 6.0,
+        "fuel_price_rp_l": 15000.0,  # Dexlite / Diesel Solar
+        "avg_speed_km_h": 15.0,
+        "gmaps_mode": "driving",
+        "duration_scale": 1.25,
+    },
+}
 
 class Stop:
     """Represents a delivery stop (kurir position or package destination)."""
@@ -30,14 +50,9 @@ class Stop:
         self.recipient = recipient
         self.stop_id = stop_id or name
 
-
-# ---------------------------------------------------------------------------
-# Dummy Surabaya Data (hardcoded, ready to run)
-# ---------------------------------------------------------------------------
-
 DUMMY_COURIER_POSITION = Stop(
-    name="Posisi Kurir",
-    address="Jl. Mulyorejo No. 15, Surabaya",
+    name="Gudang Rungkut",
+    address="Titik Keberangkatan Utama",
     lat=-7.2756,
     lng=112.7843,
     recipient="",
@@ -103,31 +118,16 @@ DUMMY_PACKAGES: List[Stop] = [
     ),
 ]
 
-
-# ---------------------------------------------------------------------------
-# OSRM Distance/Duration Matrix
-# ---------------------------------------------------------------------------
-
 OSRM_BASE_URL = "http://router.project-osrm.org/table/v1/driving"
+OSRM_ROUTE_URL = "http://router.project-osrm.org/route/v1/driving"
 
 def _build_coordinate_string(stops: List[Stop]) -> str:
-    """Format coordinates as 'lng,lat;lng,lat;...' for OSRM."""
     return ";".join(f"{s.lng},{s.lat}" for s in stops)
-
 
 def fetch_osrm_matrix(
     stops: List[Stop],
+    vehicle: str = "motorcycle",
 ) -> Tuple[List[List[int]], List[List[int]]]:
-    """
-    Fetch real road-based distance (meters) and duration (seconds) matrices
-    from the free public OSRM API.
-
-    Returns:
-        distance_matrix: N×N list of lists (meters, int)
-        duration_matrix: N×N list of lists (seconds, int)
-
-    Falls back to haversine straight-line distances if OSRM is unreachable.
-    """
     coords = _build_coordinate_string(stops)
     url = f"{OSRM_BASE_URL}/{coords}"
     params = {
@@ -144,7 +144,6 @@ def fetch_osrm_matrix(
         if data.get("code") != "Ok":
             raise ValueError(f"OSRM error: {data.get('message', 'unknown')}")
 
-        # OSRM returns floats; convert to int
         raw_dist = data["distances"]
         raw_dur = data["durations"]
 
@@ -152,23 +151,36 @@ def fetch_osrm_matrix(
         dist_matrix = []
         dur_matrix = []
 
+        cfg = VEHICLES.get(vehicle, VEHICLES["motorcycle"])
+        dur_scale = cfg["duration_scale"]
+        avg_speed_mps = cfg["avg_speed_km_h"] / 3.6
+
         for i in range(n):
             dist_row = []
             dur_row = []
             for j in range(n):
                 d = raw_dist[i][j]
                 t = raw_dur[i][j]
-                dist_row.append(int(d) if d is not None else 0)
-                dur_row.append(int(t) if t is not None else 0)
+                
+                dist_val = int(d) if d is not None else 0
+                dist_row.append(dist_val)
+                
+                if t is not None:
+                    if dur_scale is not None:
+                        dur_val = int(t * dur_scale)
+                    else:
+                        dur_val = int(dist_val / avg_speed_mps) if avg_speed_mps > 0 else 0
+                else:
+                    dur_val = 0
+                dur_row.append(dur_val)
             dist_matrix.append(dist_row)
             dur_matrix.append(dur_row)
 
         return dist_matrix, dur_matrix
 
     except Exception as exc:
-        # Graceful fallback: haversine distances, assume 40 km/h avg speed
         print(f"[OSRM fallback] {exc}")
-        return _haversine_matrix(stops)
+        return _haversine_matrix(stops, vehicle)
 
 
 def _haversine(s1: Stop, s2: Stop) -> int:
@@ -180,28 +192,54 @@ def _haversine(s1: Stop, s2: Stop) -> int:
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
     return int(2 * R * math.asin(math.sqrt(a)))
 
-
 def _haversine_matrix(
     stops: List[Stop],
+    vehicle: str = "motorcycle",
 ) -> Tuple[List[List[int]], List[List[int]]]:
     n = len(stops)
     dist_matrix = [[0] * n for _ in range(n)]
     dur_matrix = [[0] * n for _ in range(n)]
-    speed_ms = 40_000 / 3600  # 40 km/h in m/s
+    
+    cfg = VEHICLES.get(vehicle, VEHICLES["motorcycle"])
+    speed_ms = cfg["avg_speed_km_h"] / 3.6
 
     for i in range(n):
         for j in range(n):
             if i != j:
                 d = _haversine(stops[i], stops[j])
                 dist_matrix[i][j] = d
-                dur_matrix[i][j] = int(d / speed_ms)
+                dur_matrix[i][j] = int(d / speed_ms) if speed_ms > 0 else 0
 
     return dist_matrix, dur_matrix
 
+def fetch_osrm_route_geometry(
+    stops: List[Stop],
+) -> List[List[float]]:
+    if len(stops) < 2:
+        return [[s.lat, s.lng] for s in stops]
 
-# ---------------------------------------------------------------------------
-# OR-Tools TSP Solver
-# ---------------------------------------------------------------------------
+    coords = ";".join(f"{s.lng},{s.lat}" for s in stops)
+    url = f"{OSRM_ROUTE_URL}/{coords}"
+    params = {
+        "overview": "full",
+        "geometries": "geojson",
+        "steps": "false",
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("code") != "Ok" or not data.get("routes"):
+            raise ValueError(f"OSRM route error: {data.get('message', 'unknown')}")
+
+        geojson_coords = data["routes"][0]["geometry"]["coordinates"]
+        return [[c[1], c[0]] for c in geojson_coords]
+
+    except Exception as exc:
+        print(f"[OSRM route geometry fallback] {exc}")
+        return [[s.lat, s.lng] for s in stops]
 
 def solve_tsp(
     stops: List[Stop],
@@ -228,7 +266,6 @@ def solve_tsp(
         from ortools.constraint_solver import routing_enums_pb2
         from ortools.constraint_solver import pywrapcp
     except ImportError:
-        # Fallback: nearest-neighbour greedy if OR-Tools not installed
         return _greedy_tsp(stops, dist_matrix, depot_index)
 
     n = len(stops)
@@ -257,7 +294,6 @@ def solve_tsp(
     if not solution:
         return _greedy_tsp(stops, dist_matrix, depot_index)
 
-    # Extract route
     route_indices = []
     idx = routing.Start(0)
     while not routing.IsEnd(idx):
@@ -310,22 +346,17 @@ def _greedy_tsp(
         "status": "greedy",
     }
 
-
-# ---------------------------------------------------------------------------
-# Utility helpers used by app.py
-# ---------------------------------------------------------------------------
-
 def estimate_savings(
     original_stops: List[Stop],
     optimized_indices: List[int],
     dist_matrix: List[List[int]],
+    vehicle: str = "motorcycle",
 ) -> Dict[str, Any]:
     """
     Compare naive sequential route vs optimised route.
     Returns distance saved (m), fuel saved (Rp), time saved (min).
     """
     n = len(original_stops)
-    # Naive: visit in original list order 0→1→2→…→n-1→0
     naive_dist = sum(dist_matrix[i][i + 1] for i in range(n - 1)) + dist_matrix[n - 1][0]
 
     optimised_dist = sum(
@@ -334,23 +365,31 @@ def estimate_savings(
     )
 
     saved_m = max(0, naive_dist - optimised_dist)
-    # Fuel: assume 1 litre per 12 km, Rp 12.500/litre → Rp 1.042/km
-    fuel_rp = int((saved_m / 1000) * 1_042)
-    # Time: assume avg speed 25 km/h in city → 2.4 min/km
-    time_min = int((saved_m / 1000) * 2.4)
+    
+    cfg = VEHICLES.get(vehicle, VEHICLES["motorcycle"])
+    fuel_cons = cfg["fuel_consumption_km_l"]
+    fuel_price = cfg["fuel_price_rp_l"]
+    avg_speed = cfg["avg_speed_km_h"]
+    
+    if fuel_cons > 0:
+        fuel_saved_rp = int((saved_m / 1000) / fuel_cons * fuel_price)
+    else:
+        fuel_saved_rp = 0
+        
+    time_saved_min = int((saved_m / 1000) / avg_speed * 60) if avg_speed > 0 else 0
 
     return {
         "distance_saved_m": saved_m,
         "distance_saved_km": round(saved_m / 1000, 1),
-        "fuel_saved_rp": fuel_rp,
-        "time_saved_min": time_min,
+        "fuel_saved_rp": fuel_saved_rp,
+        "time_saved_min": time_saved_min,
     }
 
 
-def build_google_maps_url(destination: Stop) -> str:
+def build_google_maps_url(destination: Stop, travelmode: str = "driving") -> str:
     """Build a Google Maps turn-by-turn navigation URL for a destination."""
     return (
         f"https://www.google.com/maps/dir/?api=1"
         f"&destination={destination.lat},{destination.lng}"
-        f"&travelmode=driving"
+        f"&travelmode={travelmode}"
     )
