@@ -2,6 +2,29 @@ import requests
 import math
 from typing import List, Tuple, Dict, Any, Optional
 
+
+def geocode_address(address: str) -> Optional[Tuple[float, float]]:
+    url = "https://nominatim.openstreetmap.org/search"
+    
+    params = {
+        "q": address,
+        "format": "json",
+        "limit": 1,
+    }
+    headers = {"User-Agent": "KetKetPaket/1.0 (FinalProject)"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        results = resp.json()
+        if results:
+            lat = float(results[0]["lat"])
+            lng = float(results[0]["lon"])
+            return lat, lng
+    except Exception as e:
+        print(f"[Geocoding error] {e}")
+    return None
+
+
 VEHICLES = {
     "motorcycle": {
         "name": "Sepeda Motor",

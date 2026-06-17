@@ -14,6 +14,7 @@ from solver import (
     estimate_savings,
     build_google_maps_url,
     VEHICLES,
+    geocode_address,
 )
 
 st.set_page_config(
@@ -829,13 +830,24 @@ with tab_daftar:
         add_clicked = st.button("+", key="btn_add_pkg", use_container_width=True)
 
     if add_clicked and new_addr.strip():
-        import random
         recipient_val = new_recipient.strip() if new_recipient.strip() else "Penerima Baru"
+        with st.spinner("📍 Mencari koordinat alamat…"):
+            coords = geocode_address(new_addr.strip())
+        if coords:
+            pkg_lat, pkg_lng = coords
+            st.success(f"✅ Alamat '{new_addr.strip()[:30]}' berhasil ditambahkan!")
+        else:
+            pkg_lat = st.session_state.courier.lat
+            pkg_lng = st.session_state.courier.lng
+            st.warning(
+                "⚠️ Alamat tidak ditemukan. Titik sementara diset ke lokasi gudang — "
+                "harap edit atau gunakan alamat yang lebih lengkap (tambahkan nama kota)."
+            )
         new_stop = Stop(
             name=recipient_val[:25],
             address=new_addr.strip(),
-            lat=-7.2575 + random.uniform(-0.03, 0.03),
-            lng=112.7488 + random.uniform(-0.03, 0.03),
+            lat=pkg_lat,
+            lng=pkg_lng,
             recipient=recipient_val,
             stop_id=f"PKG_{len(st.session_state.packages)+1:03d}",
         )
